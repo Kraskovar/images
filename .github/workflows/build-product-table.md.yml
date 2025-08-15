@@ -20,11 +20,14 @@ jobs:
           python3 - <<'PY'
           import os, re, csv, urllib.parse, subprocess
 
+          # что считаем картинками
           exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'}
+
+          # база Pages
           owner, repo = os.environ['GITHUB_REPOSITORY'].split('/')
           base_pages = f"https://{owner.lower()}.github.io/{repo.lower()}"
 
-          # --- опциональные словари названий ---
+          # ===== опциональные словари названий =====
           def load_map(fname):
             d = {}
             if os.path.exists(fname):
@@ -37,17 +40,16 @@ jobs:
                   v = (row[1] or '').strip()
                   if k: d[k] = v
             return d
-
           products_map = load_map('products_map.csv')
           colors_map   = load_map('colors_map.csv')
 
-          # --- утилиты ---
+          # ===== нормализация/парсинг имён =====
           translit = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z','и':'i','й':'y',
                       'к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f',
                       'х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'}
           def norm_slug(s:str)->str:
             s = s.lower()
-            s = ''.join(translit.get(ch, ch) for ch in s)  # на случай кириллицы в именах
+            s = ''.join(translit.get(ch, ch) for ch in s)
             s = re.sub(r'[^a-z0-9._-]+','_',s)
             s = re.sub(r'_+','_',s).strip('_')
             return s
@@ -59,6 +61,7 @@ jobs:
             if re.fullmatch(r'0\d{2}', t): t = '0.' + t[1:]  # 075 -> 0.75
             return t
 
+          # product_code_color_code_volume
           def parse_pack_filename(name_noext):
             toks = [t for t in name_noext.split('_') if t]
             volume = ''; color=''; product_tokens = toks[:]
@@ -77,70 +80,78 @@ jobs:
             product = norm_slug('_'.join(product_tokens))
             return product, color, volume
 
-          # object_N_<hint>_<color>.ext  -> hint может содержать "_", цвет берём как последний токен
+          # object_N_<hint>_<color>.*  -> для задачи цвет игнорируем, берём "канонический" URL на hint
           def parse_object_filename(base_noext):
             b = norm_slug(base_noext)
             if not (b.startswith('object_1_') or b.startswith('object_2_')): return None
             parts = b.split('_', 2)
             if len(parts) < 3: return None
-            n = parts[1]
+            n = parts[1]          # '1' или '2'
             rest = parts[2]
-            if '_' not in rest: return None
-            hint, color = rest.rsplit('_', 1)
-            hint = norm_slug(hint); color = norm_slug(color)
-            return n, hint, color
+            # hint может содержать '_', цвет — последний токен (но мы его игнорируем)
+            if '_' in rest:
+              hint, _color = rest.rsplit('_', 1)
+            else:
+              hint = rest
+            hint = norm_slug(hint)
+            return n, hint
 
-          # --- индексируем банки (packshots) ---
+          # ===== индексируем банки (packshots) =====
           packs = {}  # (product,color) -> {vol: url}
           for root, _, files in os.walk('.'):
             if root.startswith('./.git') or root.startswith('./.github'): continue
             for f in files:
               ext = os.path.splitext(f)[1].lower()
               if ext not in exts: continue
+              name_noext = os.path.splitext(f)[0]
+              if name_noext.lower().startswith('object_'): continue  # банки только
               rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
               url = base_pages + '/' + urllib.parse.quote(rel, safe="/._-~")
-              name_noext = os.path.splitext(os.path.basename(f))[0]
-              # пропускаем object_* при сборе packshots
-              if name_noext.lower().startswith('object_'): continue
               product, color, volume = parse_pack_filename(name_noext)
               if not product or not color or not volume: continue
               d = packs.setdefault((product, color), {})
               d[volume] = url
 
-          # --- индексируем объекты ---
-          obj1 = {}  # (hint,color) -> url
-          obj2 = {}
+          # ===== индексируем объекты и берём "канон" по hint =====
+          # выбираем детерминированно — первый по алфавиту путь для каждого hint
+          obj1_by_hint = {}  # hint -> url
+          obj2_by_hint = {}  # hint -> url
+          temp1, temp2 = {}, {}
           for root, _, files in os.walk('.'):
             if root.startswith('./.git') or root.startswith('./.github'): continue
             for f in files:
               ext = os.path.splitext(f)[1].lower()
               if ext not in exts: continue
-              rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
-              url = base_pages + '/' + urllib.parse.quote(rel, safe="/._-~")
-              name_noext = os.path.splitext(os.path.basename(f))[0]
+              name_noext = os.path.splitext(f)[0]
               parsed = parse_object_filename(name_noext)
               if not parsed: continue
-              n, hint, color = parsed
-              if n == '1' and (hint,color) not in obj1: obj1[(hint,color)] = url
-              if n == '2' and (hint,color) not in obj2: obj2[(hint,color)] = url
+              n, hint = parsed
+              rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
+              url = base_pages + '/' + urllib.parse.quote(rel, safe="/._-~")
+              if n == '1':
+                temp1.setdefault(hint, []).append(url)
+              else:
+                temp2.setdefault(hint, []).append(url)
+          for hint, urls in temp1.items():
+            obj1_by_hint[hint] = sorted(urls)[0]
+          for hint, urls in temp2.items():
+            obj2_by_hint[hint] = sorted(urls)[0]
 
-          def find_object(obj_map, product_code, color_code):
+          # поиск лучшего hint: самое длинное вхождение в product_code
+          def find_by_hint(dct, product_code):
             best_url = ''
             best_len = 0
-            for (hint, color), url in obj_map.items():
-              if color != color_code: continue
+            for hint, url in dct.items():
               if hint in product_code and len(hint) > best_len:
                 best_len = len(hint); best_url = url
             return best_url
 
-          # --- собираем строки ---
+          # ===== собираем строки =====
           def md_escape(s: str) -> str:
             return (s or '').replace('|', '\\|')
 
           rows = []
-          keys = sorted(packs.keys(), key=lambda k:(k[0],k[1]))
-          seen_pairs = set(keys)  # формируем строки только по тем, где есть банки
-
+          keys = sorted(packs.keys(), key=lambda k:(k[0],k[1]))  # только те, где есть банки
           for product, color in keys:
             pmap = packs[(product,color)]
             pack_075 = pmap.get('0.75','')
@@ -155,9 +166,9 @@ jobs:
             product_name = products_map.get(product, product.replace('_',' ').title())
             color_name   = colors_map.get(color, color)
 
-            # ищем object_1/object_2 по подсказке (hint ∈ product_code) и совпадению цвета
-            o1 = find_object(obj1, product, color)
-            o2 = find_object(obj2, product, color)
+            # теперь объектные фото — ТОЛЬКО по hint (цвет не учитываем)
+            o1 = find_by_hint(obj1_by_hint, product) or ''
+            o2 = find_by_hint(obj2_by_hint, product) or ''
 
             rows.append({
               'product_code': product,
@@ -171,7 +182,7 @@ jobs:
               'video': ''
             })
 
-          # --- Markdown ---
+          # ===== Markdown =====
           header = ["product_code","product_name","color_code","color_name","pack_0_75","pack_2_2","object_1","object_2","video"]
           out = []
           out.append("| " + " | ".join(header) + " |")
@@ -195,9 +206,8 @@ jobs:
           subprocess.check_call(['git','config','user.name','github-actions'])
           subprocess.check_call(['git','config','user.email','github-actions@github.com'])
           subprocess.check_call(['git','add','product_table.md'])
-          subprocess.check_call(['git','commit','-m','data: product_table.md with object_1/object_2 mapped from object files'])
+          subprocess.check_call(['git','commit','-m','data: product_table.md with object_1/object_2 by product hint (color-agnostic)'])
           PY
 
       - name: Push changes
         run: git push || true
-
