@@ -1,0 +1,92 @@
+name: Mass rename images (slugify + volumes)
+
+on:
+  workflow_dispatch: {}   # запуск вручную
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rename image files per rules
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+
+          exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+          # Транслит (работаем в lower-case)
+          translit = {
+            'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z','и':'i','й':'y',
+            'к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f',
+            'х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'
+          }
+
+          def transliterate(s: str) -> str:
+            s = s.lower()
+            return ''.join(translit.get(ch, ch) for ch in s)
+
+          def normalize_volumes(base: str) -> str:
+            # , -> . (0,75 -> 0.75; 2,2 -> 2.2)
+            b = base.replace(',', '.')
+            # 22, 22л/22l как отдельный токен -> 2.2
+            # границы: начало/конец или нецифровой символ вокруг
+            b = re.sub(r'(?<!\d)22(?=[^0-9]|$)', '2.2', b)
+            b = re.sub(r'(?<!\d)22\s*[lл](?=[^0-9a-z]|$)', '2.2', b)
+            # 2.2л / 2.2l -> 2.2
+            b = re.sub(r'(?<!\d)2\.2\s*[lл](?=[^0-9a-z]|$)', '2.2', b)
+            # 0xx как отдельный токен -> 0.xx (075 -> 0.75)
+            b = re.sub(r'(?<!\d)0(\d{2})(?!\d)', r'0.\1', b)
+            return b
+
+          def slugify(base: str) -> str:
+            base = transliterate(base)
+            base = normalize_volumes(base)
+            # пробелы и дефисы -> _
+            base = re.sub(r'[ \t\-]+', '_', base)
+            # оставляем латиницу/цифры/_/.
+            base = re.sub(r'[^a-z0-9._]+', '_', base)
+            # сжать повторяющиеся _, убрать крайние
+            base = re.sub(r'_+', '_', base).strip('_')
+            return base or 'img'
+
+          renames = []
+          for root, _, files in os.walk('.'):
+            if root.startswith('./.git'):
+              continue
+            for f in files:
+              name, ext = os.path.splitext(f)
+              if ext.lower() in exts:
+                newname = slugify(name) + ext.lower().replace('.jpeg', '.jpg')
+                if newname != f:
+                  old = os.path.join(root, f)
+                  new = os.path.join(root, newname)
+                  # если есть коллизия — добавляем _1, _2 ...
+                  i = 1
+                  while os.path.exists(new) and os.path.abspath(new) != os.path.abspath(old):
+                    n, e = os.path.splitext(newname)
+                    new = os.path.join(root, f"{n}_{i}{e}")
+                    i += 1
+                  renames.append((old, new))
+
+          for old, new in renames:
+            print(f"{old} -> {new}")
+            os.rename(old, new)
+
+          if renames:
+            subprocess.check_call(['git','config','user.name','github-actions'])
+            subprocess.check_call(['git','config','user.email','github-actions@github.com'])
+            subprocess.check_call(['git','add','-A'])
+            subprocess.check_call(['git','commit','-m','chore: slugify + volume fixes for image filenames'])
+          else:
+            print('No files to rename.')
+          PY
+
+      - name: Push changes
+        run: git push || true
