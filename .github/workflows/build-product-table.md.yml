@@ -1,7 +1,7 @@
 name: Build product table (Markdown)
 
 on:
-  workflow_dispatch: {}   # ручной запуск из Actions
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -20,117 +20,144 @@ jobs:
           python3 - <<'PY'
           import os, re, csv, urllib.parse, subprocess
 
-          exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+          exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'}
           owner, repo = os.environ['GITHUB_REPOSITORY'].split('/')
           base_pages = f"https://{owner.lower()}.github.io/{repo.lower()}"
 
-          # === Маппинги названий (опционально) ===
-          # products_map.csv: product_code,product_name
-          # colors_map.csv:   color_code,color_name
+          # --- опциональные словари названий ---
           def load_map(fname):
             d = {}
             if os.path.exists(fname):
               with open(fname, 'r', encoding='utf-8') as f:
                 rdr = csv.reader(f)
-                header = next(rdr, None)
+                _ = next(rdr, None)
                 for row in rdr:
-                  if not row or len(row) < 2: 
-                    continue
-                  key = (row[0] or '').strip()
-                  val = (row[1] or '').strip()
-                  if key:
-                    d[key] = val
+                  if not row or len(row) < 2: continue
+                  k = (row[0] or '').strip()
+                  v = (row[1] or '').strip()
+                  if k: d[k] = v
             return d
 
           products_map = load_map('products_map.csv')
           colors_map   = load_map('colors_map.csv')
 
-          # === Парсер имени файла ===
+          # --- утилиты ---
+          translit = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z','и':'i','й':'y',
+                      'к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f',
+                      'х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'}
+          def norm_slug(s:str)->str:
+            s = s.lower()
+            s = ''.join(translit.get(ch, ch) for ch in s)  # на случай кириллицы в именах
+            s = re.sub(r'[^a-z0-9._-]+','_',s)
+            s = re.sub(r'_+','_',s).strip('_')
+            return s
+
           vol_token = re.compile(r'^\d+(?:[.,]\d+)?$')
           def norm_volume(tok):
             t = tok.replace(',', '.')
             if t == '22': t = '2.2'
-            if re.fullmatch(r'0\\d{2}', t):  # 075 -> 0.75
-              t = '0.' + t[1:]
+            if re.fullmatch(r'0\d{2}', t): t = '0.' + t[1:]  # 075 -> 0.75
             return t
 
-          def parse_filename(name_noext):
+          def parse_pack_filename(name_noext):
             toks = [t for t in name_noext.split('_') if t]
-            volume = ''
-            color  = ''
-            product_tokens = toks[:]
-
+            volume = ''; color=''; product_tokens = toks[:]
             vol_i = None
-            for i, t in enumerate(toks):
+            for i,t in enumerate(toks):
               if vol_token.fullmatch(t):
-                vol_i = i
-                volume = norm_volume(t)
-                break
-
+                vol_i = i; volume = norm_volume(t); break
             if vol_i is None:
-              if toks:
-                color = toks[-1]
-                product_tokens = toks[:-1]
+              if toks: color = norm_slug(toks[-1]); product_tokens = toks[:-1]
             else:
               if vol_i < len(toks)-1:
-                color = toks[-1]
-                product_tokens = toks[:vol_i]
+                color = norm_slug(toks[-1]); product_tokens = toks[:vol_i]
               else:
-                if vol_i >= 1:
-                  color = toks[vol_i-1]
-                  product_tokens = toks[:vol_i-1]
-                else:
-                  product_tokens = []
-
-            product = '_'.join(product_tokens)
+                if vol_i >= 1: color = norm_slug(toks[vol_i-1]); product_tokens = toks[:vol_i-1]
+                else: product_tokens=[]
+            product = norm_slug('_'.join(product_tokens))
             return product, color, volume
 
-          # === Собираем банки (packshots) ===
-          packs = {}   # (product,color) -> {'0.75': url, '2.2': url, ...}
-          for root, dirs, files in os.walk('.'):
-            if root.startswith('./.git') or root.startswith('./.github'):
-              continue
+          # object_N_<hint>_<color>.ext  -> hint может содержать "_", цвет берём как последний токен
+          def parse_object_filename(base_noext):
+            b = norm_slug(base_noext)
+            if not (b.startswith('object_1_') or b.startswith('object_2_')): return None
+            parts = b.split('_', 2)
+            if len(parts) < 3: return None
+            n = parts[1]
+            rest = parts[2]
+            if '_' not in rest: return None
+            hint, color = rest.rsplit('_', 1)
+            hint = norm_slug(hint); color = norm_slug(color)
+            return n, hint, color
+
+          # --- индексируем банки (packshots) ---
+          packs = {}  # (product,color) -> {vol: url}
+          for root, _, files in os.walk('.'):
+            if root.startswith('./.git') or root.startswith('./.github'): continue
             for f in files:
               ext = os.path.splitext(f)[1].lower()
-              if ext not in exts:
-                continue
+              if ext not in exts: continue
               rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
               url = base_pages + '/' + urllib.parse.quote(rel, safe="/._-~")
               name_noext = os.path.splitext(os.path.basename(f))[0]
-
-              product, color, volume = parse_filename(name_noext)
-              if not product or not color:
-                continue
-
+              # пропускаем object_* при сборе packshots
+              if name_noext.lower().startswith('object_'): continue
+              product, color, volume = parse_pack_filename(name_noext)
+              if not product or not color or not volume: continue
               d = packs.setdefault((product, color), {})
-              if volume:
-                d[volume] = url
+              d[volume] = url
 
-          # === Формируем строки таблицы ===
+          # --- индексируем объекты ---
+          obj1 = {}  # (hint,color) -> url
+          obj2 = {}
+          for root, _, files in os.walk('.'):
+            if root.startswith('./.git') or root.startswith('./.github'): continue
+            for f in files:
+              ext = os.path.splitext(f)[1].lower()
+              if ext not in exts: continue
+              rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
+              url = base_pages + '/' + urllib.parse.quote(rel, safe="/._-~")
+              name_noext = os.path.splitext(os.path.basename(f))[0]
+              parsed = parse_object_filename(name_noext)
+              if not parsed: continue
+              n, hint, color = parsed
+              if n == '1' and (hint,color) not in obj1: obj1[(hint,color)] = url
+              if n == '2' and (hint,color) not in obj2: obj2[(hint,color)] = url
+
+          def find_object(obj_map, product_code, color_code):
+            best_url = ''
+            best_len = 0
+            for (hint, color), url in obj_map.items():
+              if color != color_code: continue
+              if hint in product_code and len(hint) > best_len:
+                best_len = len(hint); best_url = url
+            return best_url
+
+          # --- собираем строки ---
           def md_escape(s: str) -> str:
             return (s or '').replace('|', '\\|')
 
           rows = []
-          seen_keys = sorted(packs.keys(), key=lambda k: (k[0], k[1]))
-          for product, color in seen_keys:
-            pmap = packs.get((product, color), {})
-            pack_075 = pmap.get('0.75', '')
-            if not pack_075:
-              for cand in pmap:
-                if cand.startswith('0.75'):
-                  pack_075 = pmap[cand]; break
-            pack_22  = pmap.get('2.2', '')
-            if not pack_22:
-              for cand in pmap:
-                if cand.startswith('2.2'):
-                  pack_22 = pmap[cand]; break
+          keys = sorted(packs.keys(), key=lambda k:(k[0],k[1]))
+          seen_pairs = set(keys)  # формируем строки только по тем, где есть банки
 
-            object_1 = pack_075 or pack_22  # банка с цветом
-            object_2 = ''                   # оставляем пустым
-            video    = ''                   # оставляем пустым
+          for product, color in keys:
+            pmap = packs[(product,color)]
+            pack_075 = pmap.get('0.75','')
+            if not pack_075:
+              for v,u in pmap.items():
+                if v.startswith('0.75'): pack_075=u; break
+            pack_22 = pmap.get('2.2','')
+            if not pack_22:
+              for v,u in pmap.items():
+                if v.startswith('2.2'): pack_22=u; break
 
             product_name = products_map.get(product, product.replace('_',' ').title())
             color_name   = colors_map.get(color, color)
+
+            # ищем object_1/object_2 по подсказке (hint ∈ product_code) и совпадению цвета
+            o1 = find_object(obj1, product, color)
+            o2 = find_object(obj2, product, color)
 
             rows.append({
               'product_code': product,
@@ -139,17 +166,16 @@ jobs:
               'color_name': color_name,
               'pack_0_75': pack_075,
               'pack_2_2': pack_22,
-              'object_1': object_1,
-              'object_2': object_2,
-              'video': video
+              'object_1': o1,
+              'object_2': o2,
+              'video': ''
             })
 
-          # === Пишем Markdown-таблицу ===
+          # --- Markdown ---
           header = ["product_code","product_name","color_code","color_name","pack_0_75","pack_2_2","object_1","object_2","video"]
           out = []
           out.append("| " + " | ".join(header) + " |")
           out.append("|" + "|".join("-"* (len(h)+2) for h in header) + "|")
-
           for r in rows:
             out.append("| " + " | ".join([
               md_escape(r['product_code']),
@@ -169,8 +195,9 @@ jobs:
           subprocess.check_call(['git','config','user.name','github-actions'])
           subprocess.check_call(['git','config','user.email','github-actions@github.com'])
           subprocess.check_call(['git','add','product_table.md'])
-          subprocess.check_call(['git','commit','-m','data: build product_table.md (plus video column)'])
+          subprocess.check_call(['git','commit','-m','data: product_table.md with object_1/object_2 mapped from object files'])
           PY
 
       - name: Push changes
         run: git push || true
+
