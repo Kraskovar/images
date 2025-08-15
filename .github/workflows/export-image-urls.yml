@@ -1,0 +1,69 @@
+name: Export image URLs for GitHub Pages
+
+on:
+  workflow_dispatch: {}   # ручной запуск из Actions
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build list of image URLs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, json, csv, urllib.parse, subprocess
+
+          exts = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'}
+          owner, repo = os.environ['GITHUB_REPOSITORY'].split('/')  # Kraskovar, images
+          base = f"https://{owner.lower()}.github.io/{repo.lower()}"
+
+          items = []
+          for root, dirs, files in os.walk('.'):
+            if root.startswith('./.git') or root.startswith('./.github'):
+              continue
+            for f in files:
+              ext = os.path.splitext(f)[1].lower()
+              if ext in exts:
+                rel = os.path.relpath(os.path.join(root, f), '.').replace(os.sep, '/')
+                url = base + '/' + urllib.parse.quote(rel, safe="/._-~")
+                items.append({'path': rel, 'url': url, 'file': f})
+
+          items.sort(key=lambda x: x['path'].lower())
+
+          # TXT: по одной ссылке в строке
+          with open('image_urls.txt', 'w', encoding='utf-8') as fw:
+            for it in items:
+              fw.write(it['url'] + '\n')
+
+          # CSV
+          with open('image_links.csv', 'w', encoding='utf-8', newline='') as fw:
+            w = csv.writer(fw)
+            w.writerow(['path', 'url', 'file'])
+            for it in items:
+              w.writerow([it['path'], it['url'], it['file']])
+
+          # JSON
+          with open('image_links.json', 'w', encoding='utf-8') as fw:
+            json.dump(items, fw, ensure_ascii=False, indent=2)
+
+          # Markdown список
+          with open('image_links.md', 'w', encoding='utf-8') as fw:
+            fw.write('# Image URLs\n\n')
+            for it in items:
+              fw.write(f"- `{it['path']}` — {it['url']}\n")
+
+          subprocess.check_call(['git','config','user.name','github-actions'])
+          subprocess.check_call(['git','config','user.email','github-actions@github.com'])
+          subprocess.check_call(['git','add','image_urls.txt','image_links.csv','image_links.json','image_links.md'])
+          subprocess.check_call(['git','commit','-m','docs: export image URLs for GitHub Pages'])
+          PY
+
+      - name: Push changes
+        run: git push || true
