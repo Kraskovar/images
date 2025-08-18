@@ -1,0 +1,95 @@
+name: Export product_links.txt from product_table.md
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build product_links.txt
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, sys, subprocess
+
+          MD = 'product_table.md'
+          if not os.path.exists(MD):
+            sys.exit("product_table.md не найден. Сначала собери его воркфлоуом Build product table (Markdown).")
+
+          def parse_md_table(path):
+            def split_row(line):
+              return [c.strip().replace('\\|','|') for c in line.strip().strip('|').split('|')]
+            with open(path,'r',encoding='utf-8') as f:
+              lines = [ln.rstrip('\n') for ln in f]
+            # ищем заголовок
+            hi = next((i for i,ln in enumerate(lines) if ln.startswith('|') and 'product_code' in ln), None)
+            if hi is None: return [], []
+            header = split_row(lines[hi])
+            data = []
+            for ln in lines[hi+2:]:
+              if not ln.startswith('|'): break
+              row = split_row(ln)
+              if len(row) < len(header): continue
+              data.append(dict(zip(header,row)))
+            return header, data
+
+          header, rows = parse_md_table(MD)
+          need = ['product_name','color_name','pack_0_75','object_1','object_2']
+          for k in need:
+            if k not in header:
+              sys.exit(f'В таблице нет столбца {k}')
+
+          # 1) ВЕРХ: банки 0.75 — "Product Color - URL"
+          top = []
+          for r in sorted(rows, key=lambda x: (x['product_name'].lower(), x['color_name'].lower())):
+            url = r['pack_0_75'].strip()
+            if url:
+              # один пробел, дефис, один пробел — как просили
+              top.append(f"{r['product_name']} {r['color_name']} - {url}")
+
+          # 2) НИЗ: объекты — "Product - object_1 | object_2"
+          # берём первые ненулевые ссылки для каждого product_name
+          by_product = {}
+          for r in rows:
+            p = r['product_name']
+            o1 = r['object_1'].strip()
+            o2 = r['object_2'].strip()
+            if p not in by_product:
+              by_product[p] = [o1, o2]
+            else:
+              if not by_product[p][0] and o1: by_product[p][0] = o1
+              if not by_product[p][1] and o2: by_product[p][1] = o2
+
+          bottom = []
+          for p in sorted(by_product.keys(), key=lambda s: s.lower()):
+            o1, o2 = by_product[p]
+            if o1 and o2:
+              bottom.append(f"{p} - {o1} | {o2}")
+            elif o1:
+              bottom.append(f"{p} - {o1}")
+            elif o2:
+              bottom.append(f"{p} - {o2}")
+            else:
+              bottom.append(f"{p} - ")
+
+          # Собираем файл
+          out_lines = top + [''] + bottom
+          with open('product_links.txt','w',encoding='utf-8') as fw:
+            fw.write('\n'.join(out_lines) + '\n')
+
+          subprocess.check_call(['git','config','user.name','github-actions'])
+          subprocess.check_call(['git','config','user.email','github-actions@github.com'])
+          subprocess.check_call(['git','add','product_links.txt'])
+          subprocess.check_call(['git','commit','-m','data: export product_links.txt (banks + objects)'])
+          PY
+
+      - name: Push changes
+        run: git push || true
